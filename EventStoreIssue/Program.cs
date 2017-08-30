@@ -10,6 +10,7 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using EventStore.ClientAPI.Common;
 
 namespace EventStoreIssue
 {
@@ -18,10 +19,11 @@ namespace EventStoreIssue
         protected const string PROJECTION_DEST_STREAM_NAME = "projection-destination";
         protected const string PROJECTION_SOURCE_STREAM_NAME = "projection-source";
         protected const string TEST_PROJECTION_NAME = "test-projection";
+        protected const string CONSUMER_GROUP_NAME = "consumer";
 
         static void Main(string[] args)
         {
-            string eventStoreHost = "asadoDev.internal.noesislabs.com";
+            string eventStoreHost = "192.168.1.20";
             string eventStoreUsername = "admin";
             string eventStorePassword = "changeit";
             int eventStoreTcpPort = 1113;
@@ -64,26 +66,62 @@ namespace EventStoreIssue
 
             eventStoreConnection.ConnectAsync().Wait();
 
+            // Create consumer groups / connect
+
+
+            var settings = PersistentSubscriptionSettings.Create()
+                .StartFromBeginning()
+                .WithMaxRetriesOf(0)
+                .WithReadBatchOf(100)
+                .WithLiveBufferSizeOf(100)
+                .WithMessageTimeoutOf(TimeSpan.FromSeconds(5))
+                .CheckPointAfter(TimeSpan.FromSeconds(2))
+                .ResolveLinkTos()
+                .WithNamedConsumerStrategy(SystemConsumerStrategies.Pinned);
+
+
+            eventStoreConnection.CreatePersistentSubscriptionAsync(PROJECTION_DEST_STREAM_NAME, CONSUMER_GROUP_NAME,
+                settings,
+                eventStoreConnection.Settings.DefaultUserCredentials).Wait();
+
+            eventStoreConnection.ConnectToPersistentSubscriptionAsync(PROJECTION_DEST_STREAM_NAME, CONSUMER_GROUP_NAME,
+                eventAppeared: (sub, e) =>
+                {
+                    // Twice the length of message timeout
+                    Thread.Sleep(TimeSpan.FromSeconds(10));
+
+                },
+                subscriptionDropped: (sub, reason, e) =>
+                {
+                    Console.WriteLine("LOST CONNECTION TO SUBSCRIPTION");
+                }, bufferSize: 100, autoAck: true).Wait();
+
+
+
+
+            // Publish events
+
             List<object> events = new List<object>
             {
                 new DummyEventA(Guid.NewGuid()),
-                new DummyEventA(Guid.NewGuid()),
-                new DummyEventA(Guid.NewGuid()),
-                new DummyEventA(Guid.NewGuid()),
+                new DummyEventB(Guid.NewGuid()),
                 new DummyEventA(Guid.NewGuid()),
                 new DummyEventB(Guid.NewGuid()),
+                new DummyEventA(Guid.NewGuid()),
                 new DummyEventB(Guid.NewGuid()),
+                new DummyEventA(Guid.NewGuid()),
                 new DummyEventB(Guid.NewGuid()),
-                new DummyEventB(Guid.NewGuid()),
+                new DummyEventA(Guid.NewGuid()),
                 new DummyEventB(Guid.NewGuid())
             };
 
             int expectedVersion = -1;
-            foreach (var e in events)
+            for(var i = 0; i < 10000; i++)
             {
-                var eventData = ToEventData(Guid.NewGuid(), e, new Dictionary<string, string>());
-                var result = eventStoreConnection.AppendToStreamAsync(PROJECTION_SOURCE_STREAM_NAME, expectedVersion, new EventData[] { eventData }).Result;
+                var eventData = events.Select(x => ToEventData(Guid.NewGuid(), x, new Dictionary<string, string>()));
+                var result = eventStoreConnection.AppendToStreamAsync(PROJECTION_SOURCE_STREAM_NAME, expectedVersion, eventData).Result;
                 expectedVersion = result.NextExpectedVersion;
+                Thread.Sleep(10);
             }
         }
 
